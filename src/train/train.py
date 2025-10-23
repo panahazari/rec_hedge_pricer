@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from src.data.loader import load_historical, load_forwards
+from src.data.loader import load_data
 from src.features.calendar import make_calendar_index
 from src.models.shape import hub_hourly_shape, basis_stats, volume_bootstrap_table
 from src.models.price import shape_monthly_to_hourly, simulate_prices
@@ -18,21 +18,16 @@ def _read_config(config_path: str) -> dict:
 
 def train_all(config_path: str = "configs/project.yaml"):
     cfg = _read_config(config_path)
-    excel = cfg['data_excel']
-    hist_sheet = cfg['historical_sheet']
-    fwd_sheet = cfg['forwards_sheet']
-    rename_map = cfg['rename_map']
-    fwd_cols = cfg['forwards_cols']
+
+    # Load historical + forwards using selected format
+    hist, fwd = load_data(cfg)
+
     start_year = cfg['start_year']
     end_year = cfg['end_year']
     n_scenarios = cfg['n_scenarios']
     seed = cfg.get('random_seed', 42)
     p_level = cfg.get('p_level', 0.75)
     neg_rule = cfg.get('negative_price_rule', 'include')
-
-    # Load data
-    hist = load_historical(excel, hist_sheet, rename_map)
-    fwd = load_forwards(excel, fwd_sheet, fwd_cols)
 
     # Fit simple components
     shp = hub_hourly_shape(hist)
@@ -49,6 +44,7 @@ def train_all(config_path: str = "configs/project.yaml"):
 
     # Build calendar
     cal = make_calendar_index(start_year, end_year)
+
     # Hourly hub forwards
     hh = shape_monthly_to_hourly(fwd, shp, cal)
 
@@ -70,8 +66,7 @@ def train_all(config_path: str = "configs/project.yaml"):
     prices.to_csv("results/fixed_prices.csv", index=False)
     eg.to_csv("results/expected_generation.csv", index=False)
 
-    # Simple risk breakdown (by asset)
-    # Using scenario sums for merchant and hedged RT_HUB as example
+    # Simple risk breakdown (merchant RT node revenue per scenario)
     df = gen.merge(sims_rt, on=['s','ts','market'])
     df['merch'] = df['gen_mwh'] * df['node_rt']
     agg = df.groupby(['asset','s'])['merch'].sum().reset_index()

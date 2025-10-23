@@ -26,14 +26,21 @@ forwards_cols:
   peak: "Peak"
   offpeak: "Off Peak"
 
-# Assets list (edit names to match your Excel)
+data_format: "per_asset_csv"
+
 assets:
   - name: "Wind_A"
     market: "ERCOT"
+    historical_csv: "data/hist_wind1_ercot.csv"
+    forwards_csv:   "data/forward_wind1_ercot.csv"
   - name: "Wind_B"
     market: "MISO"
+    historical_csv: "data/hist_wind2_miso.csv"
+    forwards_csv:   "data/forward_wind2_miso.csv"
   - name: "Solar_C"
     market: "CAISO"
+    historical_csv: "data/hist_solar_caiso.csv"
+    forwards_csv:   "data/forward_solar_caiso.csv"
 
 # Simulation horizon
 start_year: 2026
