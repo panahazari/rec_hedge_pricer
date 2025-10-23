@@ -1,0 +1,50 @@
+
+# Paths
+data_excel: "data/raw/input_data.xlsx"
+
+# Tabs / mappings (edit if your Excel uses different names)
+historical_sheet: "historical"
+forwards_sheet: "forwards"
+
+# Columns in historical (rename_map applies if your file differs)
+rename_map:
+  date: "Date"
+  he: "HE"
+  peak_flag: "P/OP"
+  asset: "Asset"
+  market: "Market"
+  gen_mwh: "Gen"
+  rt_node: "RT Busbar"
+  rt_hub: "RT Hub"
+  da_node: "DA Busbar"
+  da_hub: "DA Hub"
+
+# Columns in forwards
+forwards_cols:
+  month: "Month"        # YYYY-MM
+  market: "Market"
+  peak: "Peak"
+  offpeak: "Off Peak"
+
+# Assets list (edit names to match your Excel)
+assets:
+  - name: "Wind_A"
+    market: "ERCOT"
+  - name: "Wind_B"
+    market: "MISO"
+  - name: "Solar_C"
+    market: "CAISO"
+
+# Simulation horizon
+start_year: 2026
+end_year: 2030
+
+# Risk appetite (P-level means P% chance hedge >= merchant)
+p_level: 0.75
+
+# Negative-price treatment (include or zero)
+negative_price_rule: "include"   # "include" or "zero"
+
+# Number of scenarios
+n_scenarios: 2000
+random_seed: 42
