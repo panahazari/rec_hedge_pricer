@@ -1,5 +1,0 @@
-asset,product,p_level,negative_rule,fixed_price
-Wind_A,RT_HUB,0.75,include,105.93923848757302
-Wind_A,RT_NODE,0.75,include,97.16806425123269
-Wind_A,DA_HUB,0.75,include,113.49716549050103
-Wind_A,DA_NODE,0.75,include,104.60565252018395

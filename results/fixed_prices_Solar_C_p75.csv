@@ -1,0 +1,5 @@
+asset,product,p_level,negative_rule,fixed_price
+Solar_C,RT_HUB,0.75,include,36.11805592839357
+Solar_C,RT_NODE,0.75,include,36.51222085154249
+Solar_C,DA_HUB,0.75,include,36.99812192146279
+Solar_C,DA_NODE,0.75,include,36.998241349711414

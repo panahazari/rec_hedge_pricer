@@ -52,30 +52,27 @@ def pnl_hedged(df: pd.DataFrame, sell_col: str, ref_col: str, P: float, negative
     pnl = (P - ref) * vol
     return _sum_by_s(dfn['s'].to_numpy(), pnl)
 
-def find_flat_price(df: pd.DataFrame, sell_col: str, ref_col: str, p_level: float, negative_rule: str) -> float:
-    """
-    Find P* such that Quantile_{1-p}( Hedge(P*) - Merchant ) = 0 across scenarios.
-    df must contain: ['s','gen_mwh', sell_col, ref_col]
-    """
+def find_flat_price(df: pd.DataFrame, sell_col: str, ref_col: str,
+                    p_level: float, negative_rule: str) -> float:
     q = 1.0 - float(p_level)
 
-    # Precompute merchant by 's' once (faster inside bisection)
-    merch_by_s = merchant_revenue(df[['s','gen_mwh', sell_col]].copy(), sell_col)
-
+    # Merchant is not needed for the quantile target if pnl_hedged returns only CFD payoff
     def q_val(P):
-        hedge_by_s = pnl_hedged(df[['s','gen_mwh', ref_col]].copy(), sell_col=None, ref_col=ref_col,
+        hedge_by_s = pnl_hedged(df[['s','gen_mwh', ref_col]].copy(),
+                                sell_col=None, ref_col=ref_col,
                                 P=P, negative_rule=negative_rule)
-        diff = hedge_by_s.reindex(merch_by_s.index, fill_value=0.0) - merch_by_s
-        return np.percentile(diff.values, q * 100.0)
+        # We want Quantile_{1-p}( CFD payoff ) = 0
+        return np.percentile(hedge_by_s.values, q * 100.0)
 
     lo, hi = -1000.0, 1000.0
     for _ in range(50):
-        mid = 0.5 * (lo + hi)
+        mid = 0.5*(lo + hi)
         if q_val(mid) >= 0:
             hi = mid
         else:
             lo = mid
-    return 0.5 * (lo + hi)
+    return 0.5*(lo + hi)
+
 
 def solve_product_prices(sim_prices: pd.DataFrame,
                          gen_df: pd.DataFrame,
