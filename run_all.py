@@ -35,20 +35,20 @@ CONFIG = {
         {
             "name": "Wind1",
             "market": "ERCOT",
-            "hist_csv": "data/raw/hist_wind1_ercot.csv",
-            "forward_csv": "data/raw/forward_wind1_ercot.csv",
+            "hist_csv": "data/hist_wind1_ercot.csv",
+            "forward_csv": "data/forward_wind1_ercot.csv",
         },
         {
             "name": "Wind2",
             "market": "MISO",
-            "hist_csv": "data/raw/hist_wind2_miso.csv",
-            "forward_csv": "data/raw/forward_wind2_miso.csv",
+            "hist_csv": "data/hist_wind2_miso.csv",
+            "forward_csv": "data/forward_wind2_miso.csv",
         },
         {
             "name": "Solar",
             "market": "CAISO",
-            "hist_csv": "data/raw/hist_solar_caiso.csv",
-            "forward_csv": "data/raw/forward_solar_caiso.csv",
+            "hist_csv": "data/hist_solar_caiso.csv",
+            "forward_csv": "data/forward_solar_caiso.csv",
         },
     ],
     # forward column names in your CSVs
@@ -118,7 +118,8 @@ def main():
     )
 
     # 3) Horizon calendar (2026-01-01 .. 2030-12-31)
-    cal = build_calendar(start="2026-01-01 00:00:00", end="2030-12-31 23:00:00", tz=None)
+    cal = build_calendar("2026-01-01 00:00", "2030-12-31 23:00",
+                     tz="America/Chicago", markets=["ERCOT"])
 
     # 4) Turn monthly hub forwards into hourly hub curves
     hh_all = shape_monthly_to_hourly(fwd_all, shape_tbl, cal)
