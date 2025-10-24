@@ -65,41 +65,83 @@ def shape_monthly_to_hourly(forwards: pd.DataFrame, shape: pd.DataFrame, calenda
     return out[['ts','market','hub_forward_hourly']]
 
 
-def simulate_prices(hourly_hub: pd.DataFrame, basis_stats: pd.DataFrame, n_scenarios: int, seed: int = 42) -> pd.DataFrame:
+def basis_stats(hist: pd.DataFrame, price_col_hub: str, price_col_node: str) -> pd.DataFrame:
+    """
+    Expected hub-node basis by (market, month, hour) with std for simulation.
+    Returns: ['market','month','hour','mean','std']
+    """
+    df = hist.copy()
+    df['month'] = df['date'].dt.to_period('M').dt.to_timestamp()
+    df['hour'] = df['he']
+    df['basis'] = df[price_col_hub] - df[price_col_node]
+    out = df.groupby(['market','month','hour'])['basis'].agg(['mean', 'std']).reset_index()
+    return out
+
+def da_spread_stats(hist: pd.DataFrame, level: str = 'hub') -> pd.DataFrame:
+    """
+    Gen-agnostic expected DA-RT spreads by (market, month, hour) with std.
+    level: 'hub' or 'node' -> uses (da_hub-rt_hub) or (da_node-rt_node)
+    Returns: ['market','month','hour','mean','std']
+    """
+    df = hist.copy()
+    df['month'] = df['date'].dt.to_period('M').dt.to_timestamp()
+    df['hour'] = df['he']
+    if level == 'hub':
+        df['spr'] = df['da_hub'] - df['rt_hub']
+    else:
+        df['spr'] = df['da_node'] - df['rt_node']
+    out = df.groupby(['market','month','hour'])['spr'].agg(['mean','std']).reset_index()
+    return out
+
+def simulate_prices(hourly_hub: pd.DataFrame,
+                    basis_rt: pd.DataFrame,
+                    da_spr_hub: pd.DataFrame,
+                    da_spr_node: pd.DataFrame,
+                    n_scenarios: int,
+                    seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
 
     hh = hourly_hub.copy()
-    hh['ts']   = pd.to_datetime(hh['ts'])
-    hh['moy']  = hh['ts'].dt.month
+    # ✅ ensure ts is datetime, then use .dt.to_period(...)
+    hh['ts'] = pd.to_datetime(hh['ts'])
+    hh['month'] = hh['ts'].dt.to_period('M').dt.to_timestamp()
     hh['hour'] = hh['ts'].dt.hour + 1
 
-    bs = basis_stats.copy()
 
-    # Join on (market, moy, hour) so historical basis applies across years
-    df = hh.merge(bs, on=['market','moy','hour'], how='left')
-    df['mean'] = df['mean'].fillna(0.0)
-    df['std']  = df['std'].fillna(0.0)
+    # Merge expected stats
+    df = (hh
+          .merge(basis_rt.rename(columns={'mean':'basis_mean','std':'basis_std'}),
+                 on=['market','month','hour'], how='left')
+          .merge(da_spr_hub.rename(columns={'mean':'spr_hub_mean','std':'spr_hub_std'}),
+                 on=['market','month','hour'], how='left')
+          .merge(da_spr_node.rename(columns={'mean':'spr_node_mean','std':'spr_node_std'}),
+                 on=['market','month','hour'], how='left'))
 
-    sims = []
+    for col in ['basis_mean','basis_std','spr_hub_mean','spr_hub_std','spr_node_mean','spr_node_std']:
+        df[col] = df[col].fillna(0.0)
+
+    rows = []
+    n = len(df)
     for s in range(n_scenarios):
-        z = rng.standard_normal(len(df))
-        basis = df['mean'].values + df['std'].values * z
+        z_basis = rng.standard_normal(n)
+        z_spr_h = rng.standard_normal(n)
+        z_spr_n = rng.standard_normal(n)
 
-        hub = df['hub_forward_hourly'].values
-        node = hub - basis
+        hub_rt = df['hub_forward_hourly'].values  # deterministic for clarity/audit
+        basis  = df['basis_mean'].values + df['basis_std'].values * z_basis
+        node_rt = hub_rt - basis
 
-        tmp = pd.DataFrame({
+        hub_da = hub_rt + (df['spr_hub_mean'].values + df['spr_hub_std'].values * z_spr_h)
+        node_da = node_rt + (df['spr_node_mean'].values + df['spr_node_std'].values * z_spr_n)
+
+        rows.append(pd.DataFrame({
             's': s,
             'ts': df['ts'].values,
             'market': df['market'].values,
-            'hub_rt': hub,
-            'node_rt': node,
-        })
-        # simple DA proxy
-        tmp['hub_da']  = hub * 0.98 + 0.02 * tmp['hub_rt']
-        tmp['node_da'] = node * 0.98 + 0.02 * tmp['node_rt']
+            'hub_rt': hub_rt,
+            'node_rt': node_rt,
+            'hub_da': hub_da,
+            'node_da': node_da
+        }))
 
-        sims.append(tmp)
-
-    return pd.concat(sims, ignore_index=True)
-
+    return pd.concat(rows, ignore_index=True)

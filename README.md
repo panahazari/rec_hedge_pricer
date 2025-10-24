@@ -1,97 +1,23 @@
+## Assumptions & Method (concise)
 
-# Merchant Hedge Pricer
+- **HPFC shaping:** Monthly Peak/OP hub forwards → hourly via normalized historical shapes by (market, month, hour). Bucket averages match the monthly forwards exactly.
+- **Basis:** Expected hub→node basis = mean of (hub−node) by (market, month, hour) from history. Basis volatility is simulated (Gaussian with historical std).
+- **DA–RT spreads:** Expected spread by (market, month, hour) from history; DA = RT + spread + noise.
+- **Generation:** Volume risk via bootstrap of historical hourly generation by (asset, month, hour). (Implicitly captures curtailment/outages embedded in history.)
+- **Settlement structures:** Four products: RT/DA × Hub/Node, modeled as **as-generated CfDs**.
+- **Negative prices:** Configurable rule: `"include"` or `"zero"`. Breakdown exports both `P* (include)` and `P* (zero)`; `D` = delta between them.
+- **Risk target:** Solve flat price `P*` so that **P(hedged ≥ merchant) ≥ P-level** (default P75). A **P-grid** (P50/P75/P90) is exported for sensitivity.
 
-Valuation toolkit to compute risk‑adjusted 5‑year fixed offtake prices for three merchant assets (2 wind, 1 solar) across ERCOT, MISO, CAISO. 
-Focus: energy value only. Ignore capex/O&M, taxes, capacity, RECs.
+## Outputs added
 
-## What this does
-- Loads historical hourly generation and prices (RT/DA, busbar & hub) from Excel.
-- Shapes monthly Peak/Off‑Peak hub forwards to hourly.
-- Models hub→node basis and volume using simple empirical distributions.
-- Simulates RT/DA price paths and generation.
-- Compares merchant vs fixed‑price offtake (as‑generated CfD) under four products:
-  - RT Hub‑settled, RT Busbar‑settled, DA Hub‑settled, DA Busbar‑settled.
-- Solves for a **5‑year flat price** such that **P(hedge ≥ merchant) ≥ P‑level** (default P75).
-- Exports tables: expected generation by month/Peak-OP, fixed prices, risk breakdown.
+- `results/price_breakdown.csv` — per asset/product waterfall:
+  - `A_hub_capture`, `B_basis`, `C_da_rt`, `D_neg_rule`, `E_risk`, `P_star_include`, `P_star_zero`
+- `results/fixed_prices_Pgrid.csv` — 5-year flat prices across P-levels (e.g., 0.50, 0.75, 0.90).
 
-## Repo layout
-```
-merchant-hedge-pricer/
-  configs/
-    project.yaml              # edit paths and parameters here
-  data/
-    raw/input_data.xlsx       # put your Excel here (copied if you uploaded)
-    processed/                # generated
-  models/                     # saved model artifacts
-  notebooks/                  # notebooks will be added later
-  reports/                    # slides/figures
-  results/                    # csv outputs
-  src/
-    data/loader.py
-    features/calendar.py
-    models/shape.py
-    models/volume.py
-    models/price.py
-    pricing/hedge.py
-    pricing/solve_price.py
-    train/train.py
-    utils/persistence.py
-  tests/
-  requirements.txt
-  README.md
-  LICENSE
-  .gitignore
-```
+## Interpreting the breakdown
 
-## Quick start
-1) **Install**
-```
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-2) **Configure** in `configs/project.yaml` (paths, assets, parameters).
-
-3) **Train** simple empirical models and save artifacts:
-```python
-from src.train.train import train_all
-train_all(config_path="configs/project.yaml")
-```
-
-4) **Generate prices and reports** (from a notebook later):
-```python
-from src.pricing.solve_price import solve_all_assets
-solve_all_assets(config_path="configs/project.yaml")
-```
-
-Artifacts and CSVs land in `models/` and `results/`.
-
-## Inputs (Excel)
-Expected columns in the historical tab:
-- `Date`, `HE`, `P/OP`, `Asset`, `Market`, `Gen`, 
-- `RT Busbar`, `RT Hub`, `DA Busbar`, `DA Hub`
-
-Forward curve tab:
-- `Month` (YYYY-MM), `Market`, `Peak`, `Off Peak`
-
-If your file differs, adjust `configs/project.yaml` or loader mappings.
-
-## Methods (short)
-- **Hourly shaping:** Monthly Peak/OP forwards are split to hourly using historical hub shapes by (month, weekday, HE). 
-- **Basis:** Empirical hub−node by (month, HE). 
-- **Volume:** Bootstrap generation by (month, HE).
-- **Simulation:** Draw residuals and basis; produce RT/DA & node/hub hourly paths for 2026–2030.
-- **Decision rule:** Find flat price P where the 25th percentile of (Hedge − Merchant) ≥ 0 (P75).
-
-## Outputs
-- `results/expected_generation.csv` (by month, P/OP)
-- `results/fixed_prices.csv` (four products per asset)
-- `results/risk_breakdown.csv` (mean/std/p5/p25 expected shortfall proxies)
-
-## Notes
-- Negative‑price rule configurable: include or zero settlements when LMP<0.
-- Settlement point: hub or node.
-- Price set: RT or DA.
-- Extend with alternative structures (block hedges) in `pricing/hedge.py`.
-
+- `A` = gen-weighted hub value from shaped forwards  
+- `B` = expected hub→node conversion (0 for hub-settled)  
+- `C` = expected DA–RT spread at settlement point (0 for RT products)  
+- `D` = uplift from excluding negative prices (zeroing)  
+- `E` = residual risk add-on so that `A+B+C(+D) + E = P*` (P-level target)
