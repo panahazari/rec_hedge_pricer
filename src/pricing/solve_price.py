@@ -3,62 +3,131 @@ import pandas as pd
 from typing import List
 from .hedge import merchant_revenue, pnl_hedged
 
-def find_flat_price(gen, sell_price, ref_price, p_level: float, negative_rule: str) -> float:
-    """
-    Solve for flat P where percentile_q(hedged - merchant) >= 0 with q = 1 - p_level.
-    Uses bisection on P; inputs should be aligned pandas Series, optionally multi-scenario.
-    """
-    q = 1.0 - p_level
+# src/pricing/solve_price.py
 
-    def diff_for(P):
-        d = (pnl_hedged(gen, sell_price, ref_price, P, negative_rule) - merchant_revenue(gen, sell_price))
-        if hasattr(d, "groupby"):
-            g = d.groupby('s').sum()
-            return np.percentile(g.values, q*100.0)
-        return np.percentile(d, q*100.0)
 
-    lo, hi = -200.0, 200.0
+import numpy as np
+import pandas as pd
+
+def _coerce_numeric_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            continue
+        sel = out[c]
+        # If duplicate column labels exist, sel can be a DataFrame. Take first.
+        if isinstance(sel, pd.DataFrame):
+            sel = sel.iloc[:, 0]
+        out[c] = pd.to_numeric(sel, errors='coerce').fillna(0.0)
+    return out
+
+def _sum_by_s(keys_s: np.ndarray, values: np.ndarray) -> pd.Series:
+    """
+    Fast per-s sum using numpy. Works even if 's' is not 0..N-1.
+    Returns a Series indexed by unique s values.
+    """
+    uniq, inv = np.unique(keys_s, return_inverse=True)
+    sums = np.bincount(inv, weights=values, minlength=len(uniq))
+    return pd.Series(sums, index=uniq)
+
+def merchant_revenue(df: pd.DataFrame, sell_col: str) -> pd.Series:
+    """
+    Per-scenario merchant revenue: sum_t gen_mwh * sell_price.
+    df must have ['s','gen_mwh', sell_col]
+    """
+    dfn = _coerce_numeric_cols(df, ['gen_mwh', sell_col])
+    vals = (dfn['gen_mwh'].to_numpy() * dfn[sell_col].to_numpy())
+    return _sum_by_s(dfn['s'].to_numpy(), vals)
+
+def pnl_hedged(df: pd.DataFrame, sell_col: str, ref_col: str, P: float, negative_rule: str) -> pd.Series:
+    """
+    Per-scenario hedge PnL: sum_t (P - ref_price) * vol, with vol rule on negative ref prices.
+    df must have ['s','gen_mwh', ref_col]
+    """
+    dfn = _coerce_numeric_cols(df, ['gen_mwh', ref_col])
+    ref = dfn[ref_col].to_numpy()
+    vol = dfn['gen_mwh'].to_numpy()
+    if negative_rule == 'zero':
+        vol = np.where(ref < 0.0, 0.0, vol)
+    pnl = (P - ref) * vol
+    return _sum_by_s(dfn['s'].to_numpy(), pnl)
+
+def find_flat_price(df: pd.DataFrame, sell_col: str, ref_col: str, p_level: float, negative_rule: str) -> float:
+    """
+    Find P* such that Quantile_{1-p}( Hedge(P*) - Merchant ) = 0 across scenarios.
+    df must contain: ['s','gen_mwh', sell_col, ref_col]
+    """
+    q = 1.0 - float(p_level)
+
+    # Precompute merchant by 's' once (faster inside bisection)
+    merch_by_s = merchant_revenue(df[['s','gen_mwh', sell_col]].copy(), sell_col)
+
+    def q_val(P):
+        hedge_by_s = pnl_hedged(df[['s','gen_mwh', ref_col]].copy(), sell_col=None, ref_col=ref_col,
+                                P=P, negative_rule=negative_rule)
+        diff = hedge_by_s.reindex(merch_by_s.index, fill_value=0.0) - merch_by_s
+        return np.percentile(diff.values, q * 100.0)
+
+    lo, hi = -1000.0, 1000.0
     for _ in range(50):
         mid = 0.5 * (lo + hi)
-        val = diff_for(mid)
-        if val >= 0:
+        if q_val(mid) >= 0:
             hi = mid
         else:
             lo = mid
     return 0.5 * (lo + hi)
 
-def solve_product_prices(sim_prices: pd.DataFrame, gen_df: pd.DataFrame,
-                         products: List[str], p_level: float, negative_rule: str) -> pd.DataFrame:
+def solve_product_prices(sim_prices: pd.DataFrame,
+                         gen_df: pd.DataFrame,
+                         products: list[str],
+                         p_level: float,
+                         negative_rule: str) -> pd.DataFrame:
     """
-    Compute P* for each product at requested p_level and negative price rule.
-    sim_prices: ['s','ts','market','hub_rt','node_rt','hub_da','node_da']
-    gen_df    : ['s','ts','asset','market','gen_mwh']
+    Expects sim_prices with ['s','ts','market','hub_rt','node_rt','hub_da','node_da']
+            gen_df     with ['s','ts','asset','market','gen_mwh']
     """
-    df = gen_df.merge(sim_prices, on=['s','ts','market'], how='left')
-    out_rows = []
+    # Merge and drop duplicate columns by name to avoid DataFrame selection on ref/sell cols
+    df = gen_df.merge(sim_prices, on=['s','ts','market'], how='inner')
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
+    need = {'s','ts','asset','market','gen_mwh','hub_rt','node_rt','hub_da','node_da'}
+    miss = need - set(df.columns)
+    if miss:
+        raise KeyError(f"solve_product_prices: missing columns {sorted(miss)}")
+
+    out = []
     for asset in df['asset'].unique():
-        sub = df[df['asset'] == asset]
+        sub_a = df[df['asset'] == asset].copy()
+
         for prod in products:
-            if prod == "RT_HUB":
-                sell = sub['node_rt']  # merchant realized at node RT
-                ref = sub['hub_rt']    # hedge settles at hub RT
-            elif prod == "RT_NODE":
-                sell = sub['node_rt']
-                ref = sub['node_rt']
-            elif prod == "DA_HUB":
-                sell = sub['node_rt']
-                ref = sub['hub_da']
-            elif prod == "DA_NODE":
-                sell = sub['node_rt']
-                ref = sub['node_da']
+            if   prod == 'RT_HUB':
+                sell_col, ref_col = 'node_rt', 'hub_rt'
+            elif prod == 'RT_NODE':
+                sell_col, ref_col = 'node_rt', 'node_rt'
+            elif prod == 'DA_HUB':
+                sell_col, ref_col = 'node_rt', 'hub_da'
+            elif prod == 'DA_NODE':
+                sell_col, ref_col = 'node_rt', 'node_da'
             else:
                 continue
-            P = find_flat_price(sub['gen_mwh'], sell, ref, p_level, negative_rule)
-            out_rows.append({'asset': asset, 'product': prod, 'p_level': p_level,
-                             'negative_rule': negative_rule, 'fixed_price': P})
-    return pd.DataFrame(out_rows)
 
-# ---------- Price breakdown (A, B, C, D, E) ----------
+            cols_req = ['s', 'gen_mwh', sell_col, ref_col]
+            cols_req = list(dict.fromkeys(cols_req))  # preserve order, drop dups
+            sub_cols = sub_a[cols_req].copy()
+
+            sub_cols = _coerce_numeric_cols(sub_cols, [c for c in cols_req if c != 's'])
+
+            P = find_flat_price(sub_cols, sell_col, ref_col, p_level, negative_rule)
+            out.append({
+                'asset': asset,
+                'product': prod,
+                'p_level': p_level,
+                'negative_rule': negative_rule,
+                'fixed_price': P
+            })
+
+    return pd.DataFrame(out)
+
 
 def _gen_weighted_avg(series: pd.Series, gen: pd.Series) -> float:
     w = gen.fillna(0.0).values
@@ -72,94 +141,145 @@ def compute_price_breakdown(hourly_hub_fwd: pd.DataFrame,
                             da_spr_mean_node: pd.DataFrame,
                             sims: pd.DataFrame,
                             gen_df: pd.DataFrame,
-                            products: List[str],
+                            products: list[str],
                             p_level: float) -> pd.DataFrame:
     """
-    Build waterfall components (per asset/product):
-      A: Hub capture (gen-wtd mean of hourly hub forward)
-      B: Basis conversion (gen-wtd expected node-hub difference) for node-settled products; 0 for hub-settled
-      C: DA-RT spread at settlement point (gen-wtd expected)
-      D: Negative-price rule delta = P*(zero) - P*(include)  (computed via solver, scenario-based)
-      E: Risk add-on so that A+B+C(+D if applicable) + E = selected P*
-    Returns: ['asset','product','A_hub_capture','B_basis','C_da_rt','D_neg_rule','E_risk','P_star','neg_rule']
+    Build expected components used to explain fixed prices:
+      - H_t            : hourly hub forward (from hourly_hub_fwd)
+      - basis_mean     : E[RT hub - RT node] by (market, mon, hour)
+      - spr_hub_mean   : E[DA hub - RT hub]   by (market, mon, hour)
+      - spr_node_mean  : E[DA node - RT node] by (market, mon, hour)
+
+    Keys are normalized to (market, mon=1..12, hour=HE 1..24).
+    Returns one row per (asset, product) with component averages and P* at p_level.
     """
-    # Prepare deterministic expectations aligned to gen hours
-    cal = hourly_hub_fwd.copy()
-    cal['month'] = cal['ts'].to_period('M').dt.to_timestamp()
-    cal['hour'] = cal['ts'].dt.hour + 1
 
-    # Merge expected basis & spreads
-    exp = (cal
-           .merge(basis_mean_rt.rename(columns={'mean':'basis_mean'})[['market','month','hour','basis_mean']],
-                  on=['market','month','hour'], how='left')
-           .merge(da_spr_mean_hub.rename(columns={'mean':'spr_hub_mean'})[['market','month','hour','spr_hub_mean']],
-                  on=['market','month','hour'], how='left')
-           .merge(da_spr_mean_node.rename(columns={'mean':'spr_node_mean'})[['market','month','hour','spr_node_mean']],
-                  on=['market','month','hour'], how='left'))
-    for col in ['basis_mean','spr_hub_mean','spr_node_mean']:
-        exp[col] = exp[col].fillna(0.0)
+    # --- Calendar from hourly hub fwd ---
+    cal = hourly_hub_fwd[['market', 'ts', 'hub_forward_hourly']].copy()
+    cal['ts'] = pd.to_datetime(cal['ts'])
+    cal['mon'] = cal['ts'].dt.month
+    cal['hour'] = cal['ts'].dt.hour + 1  # HE 1..24
 
-    # Join gen and expectations
-    g = gen_df.merge(exp, on=['ts','market'], how='left')
-
-    rows = []
-    df = gen_df.merge(sims, on=['s','ts','market'], how='left')
-
-    for asset in g['asset'].unique():
-        g_asset = g[g['asset'] == asset]
-
-        # A: hub capture (gen-weighted mean of hub forward)
-        A = _gen_weighted_avg(g_asset['hub_forward_hourly'], g_asset['gen_mwh'])
-
-        # Expected B and C per settlement later
-        # Precompute gen-weighted expected basis and spreads
-        B_exp = -_gen_weighted_avg(g_asset['basis_mean'], g_asset['gen_mwh'])  # node = hub - basis -> add (-basis)
-        C_hub = _gen_weighted_avg(g_asset['spr_hub_mean'], g_asset['gen_mwh'])
-        C_node = _gen_weighted_avg(g_asset['spr_node_mean'], g_asset['gen_mwh'])
-
-        # Solve prices for include/zero to compute D and E cleanly
-        sub = df[df['asset'] == asset]
-        # common sell legs per product defined below
-        for prod in products:
-            if prod == "RT_HUB":
-                sell = sub['node_rt']; ref_inc = sub['hub_rt']; ref_zero = sub['hub_rt']
-                B = 0.0; C = 0.0
-            elif prod == "RT_NODE":
-                sell = sub['node_rt']; ref_inc = sub['node_rt']; ref_zero = sub['node_rt']
-                B = B_exp; C = 0.0
-            elif prod == "DA_HUB":
-                sell = sub['node_rt']; ref_inc = sub['hub_da']; ref_zero = sub['hub_da']
-                B = 0.0; C = C_hub
-            elif prod == "DA_NODE":
-                sell = sub['node_rt']; ref_inc = sub['node_da']; ref_zero = sub['node_da']
-                B = B_exp; C = C_node
+    # --- Normalize stats inputs to (market, mon, hour, value) ---
+    def _norm(df, col_name):
+        out = df.copy()
+        if 'mon' not in out.columns:
+            # allow 'month' (timestamp) -> mon
+            if 'month' in out.columns:
+                out['mon'] = pd.to_datetime(out['month']).dt.month
             else:
-                continue
+                raise KeyError(f"{col_name}: requires 'mon' or 'month' column")
+        if 'hour' not in out.columns:
+            raise KeyError(f"{col_name}: requires 'hour' column")
+        out = out[['market', 'mon', 'hour', col_name]].copy()
+        return out
 
-            P_incl = find_flat_price(sub['gen_mwh'], sell, ref_inc, p_level, negative_rule="include")
-            P_zero = find_flat_price(sub['gen_mwh'], sell, ref_zero, p_level, negative_rule="zero")
-            D = P_zero - P_incl  # uplift due to zeroing negatives
+    b_rt = basis_mean_rt.rename(columns={'mean': 'basis_mean'})
+    s_h  = da_spr_mean_hub.rename(columns={'mean': 'spr_hub_mean'})
+    s_n  = da_spr_mean_node.rename(columns={'mean': 'spr_node_mean'})
 
-            # Choose P* according to the portfolio negative rule (you can set per-config if needed)
-            # For breakdown we report both effects cleanly:
-            # E_incl = residual risk premium under include; E_zero = under zero
-            E_incl = P_incl - (A + B + C)
-            E_zero = P_zero - (A + B + C) - D  # equals E_incl numerically
+    b_rt = _norm(b_rt, 'basis_mean')
+    s_h  = _norm(s_h,  'spr_hub_mean')
+    s_n  = _norm(s_n,  'spr_node_mean')
 
-            rows.append({
+    # --- Expected hourly components table keyed by ts ---
+    exp = (cal
+           .merge(b_rt, on=['market', 'mon', 'hour'], how='left')
+           .merge(s_h,  on=['market', 'mon', 'hour'], how='left')
+           .merge(s_n,  on=['market', 'mon', 'hour'], how='left'))
+    for col in ['basis_mean', 'spr_hub_mean', 'spr_node_mean']:
+        exp[col] = pd.to_numeric(exp[col], errors='coerce').fillna(0.0)
+
+    # --- Helper: expected reference price per product (hourly) ---
+    # Using means only (no stochastic shocks) to explain components
+    def _ref_cols(df):
+        df = df.copy()
+        df['RT_HUB_ref'] = df['hub_forward_hourly']
+        df['RT_NODE_ref'] = df['hub_forward_hourly'] - df['basis_mean']
+        df['DA_HUB_ref'] = df['hub_forward_hourly'] + df['spr_hub_mean']
+        df['DA_NODE_ref'] = df['hub_forward_hourly'] - df['basis_mean'] + df['spr_node_mean']
+        return df
+
+    exp = _ref_cols(exp)
+
+    # --- Compute P* via scenarios (re-use find_flat_price on merged df) ---
+    # Merge gen with sims to get scenario-level prices and volumes
+    df_all = gen_df.merge(sims, on=['s', 'ts', 'market'], how='inner')
+    df_all = df_all.loc[:, ~df_all.columns.duplicated()].copy()
+
+    out_rows = []
+    for asset in df_all['asset'].unique():
+        sub = df_all[df_all['asset'] == asset].copy()
+
+        # Join expected (non-stochastic) components for weighted means
+        sub = sub.merge(
+            exp[['market','ts','hub_forward_hourly',
+                'basis_mean','spr_hub_mean','spr_node_mean',
+                'RT_HUB_ref','RT_NODE_ref','DA_HUB_ref','DA_NODE_ref']],
+            on=['market','ts'], how='left'
+        )
+        sub = sub.loc[:, ~sub.columns.duplicated()].copy()  # <— add this
+
+
+        # Generation weights per hour (sum over scenarios later if needed)
+        # For expected averages we’ll use scenario-mean gen per hour to avoid bias.
+        gen_mean = sub.groupby('ts', as_index=False)['gen_mwh'].mean().rename(columns={'gen_mwh': 'gen_mean'})
+        sub = sub.merge(gen_mean, on='ts', how='left')
+
+        # Expected component (gen-weighted) over horizon
+        w = sub[['ts', 'gen_mean']].drop_duplicates()
+        w_sum = w['gen_mean'].sum() if w['gen_mean'].sum() != 0 else 1.0
+
+        def wavg(col):
+            tmp = sub[['ts', col]].drop_duplicates().merge(w, on='ts', how='left')
+            return float((tmp[col] * tmp['gen_mean']).sum() / w_sum)
+
+        exp_hub   = wavg('hub_forward_hourly')
+        exp_basis = wavg('basis_mean')
+        exp_spr_h = wavg('spr_hub_mean')
+        exp_spr_n = wavg('spr_node_mean')
+
+        # Solve P* per product using scenario paths
+        prods = products or ['RT_HUB', 'RT_NODE', 'DA_HUB', 'DA_NODE']
+        for prod in prods:
+            if   prod == 'RT_HUB':  sell_col, ref_col = 'node_rt', 'hub_rt'
+            elif prod == 'RT_NODE': sell_col, ref_col = 'node_rt', 'node_rt'
+            elif prod == 'DA_HUB':  sell_col, ref_col = 'node_rt', 'hub_da'
+            elif prod == 'DA_NODE': sell_col, ref_col = 'node_rt', 'node_da'
+            else:                   continue
+
+
+            cols_req = ['s', 'gen_mwh', sell_col, ref_col]
+            cols_req = list(dict.fromkeys(cols_req))  # drop duplicates but preserve order
+            df_p = sub[cols_req].copy()
+
+            # coerce to numeric defensively (skip 's')
+            df_p = _coerce_numeric_cols(df_p, [c for c in cols_req if c != 's'])
+
+            P_star = find_flat_price(df_p, sell_col, ref_col, p_level, negative_rule='zero')
+
+
+            # Expected reference (gen-weighted) from means for reporting
+            if   prod == 'RT_HUB':  exp_ref = exp_hub
+            elif prod == 'RT_NODE': exp_ref = exp_hub - exp_basis
+            elif prod == 'DA_HUB':  exp_ref = exp_hub + exp_spr_h
+            elif prod == 'DA_NODE': exp_ref = exp_hub - exp_basis + exp_spr_n
+
+            out_rows.append({
                 'asset': asset,
                 'product': prod,
-                'A_hub_capture': A,
-                'B_basis': B,
-                'C_da_rt': C,
-                'D_neg_rule': D,
-                'E_risk': E_incl,     # report include-version (same as zero-version residual)
-                'P_star_include': P_incl,
-                'P_star_zero': P_zero
+                'p_level': p_level,
+                'hub_mean': exp_hub,
+                'basis_mean': exp_basis,
+                'da_spr_hub_mean': exp_spr_h,
+                'da_spr_node_mean': exp_spr_n,
+                'expected_ref_price': exp_ref,
+                'fixed_price': P_star,
+                'risk_premium': P_star - exp_ref
             })
 
-    out = pd.DataFrame(rows)
-    return out
+    return pd.DataFrame(out_rows)
+
 
 def expected_generation_monthly(gen_df: pd.DataFrame) -> pd.DataFrame:
     tmp = gen_df.copy()
